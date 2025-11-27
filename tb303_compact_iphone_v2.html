@@ -73,7 +73,7 @@
 </head>
 <body>
   <div class="synth" id="app">
-    <h1>Web TB-303 (Compact v2)</h1>
+    <h1>Web TB-303 (Compact v2 - Refactored)</h1>
 
     <div class="controls">
       <div class="ctrl">
@@ -117,261 +117,599 @@
       </div>
     </div>
 
-    <p class="help">ノブは1/3サイズ、ステップ枠を縮小。必要ならさらに極小化も可能です。</p>
+    <p class="help">リファクタリング済み：クラスベース設計、改善されたコード構造</p>
   </div>
 
   <script>
-    document.addEventListener('DOMContentLoaded', () => {
-      let audioCtx;
-      let isPlaying = false;
-      let currentStep = 0;
-      let nextNoteTime = 0.0;
-      let timerID;
-      const MAX_STEPS = 16;
-      let sequenceLength = 16;
-      let baseNote = 36;
-      const sequencerContainer = document.getElementById('sequencer');
-      const playStopButton = document.getElementById('play-stop');
-      const randomizeButton = document.getElementById('randomize');
-      const bpmSlider = document.getElementById('bpm');
-      const bpmDisplay = document.getElementById('bpm-display');
-      const lengthSlider = document.getElementById('length');
-      const lengthDisplay = document.getElementById('length-display');
-      const knobs = {
-        waveform: document.getElementById('waveform'),
-        cutoff: document.getElementById('cutoff'),
-        resonance: document.getElementById('resonance'),
-        envMod: document.getElementById('envMod'),
-        decay: document.getElementById('decay'),
-      };
+    'use strict';
 
-      // Build sequencer grid (8x2 visual, 16 logical)
-      function initGrid() {
-        for (let i = 0; i < MAX_STEPS; i++) {
-          const stepEl = document.createElement('div');
-          stepEl.classList.add('step');
-          stepEl.dataset.index = i;
-          const led = document.createElement('div');
-          led.classList.add('led');
-          led.addEventListener('click', () => toggleNote(i));
-          const noteControls = document.createElement('div');
-          noteControls.classList.add('note-controls');
-          const up = document.createElement('button'); up.textContent = '▲';
-          up.addEventListener('click', () => changePitch(i, 1));
-          const down = document.createElement('button'); down.textContent = '▼';
-          down.addEventListener('click', () => changePitch(i, -1));
-          const accent = document.createElement('button'); accent.textContent = 'A';
-          accent.addEventListener('click', () => toggleAccent(i));
-          const slide = document.createElement('button'); slide.textContent = 'S';
-          slide.addEventListener('click', () => toggleSlide(i));
-          noteControls.append(up, down, accent, slide);
-          stepEl.append(led, noteControls);
-          sequencerContainer.appendChild(stepEl);
+    // ============================================================
+    // Constants
+    // ============================================================
+    const CONSTANTS = {
+      MAX_STEPS: 16,
+      BASE_NOTE: 36,
+      SCHEDULE_AHEAD_TIME: 0.1,
+      SCHEDULER_INTERVAL: 25,
+      SIXTEENTH_NOTE_MULTIPLIER: 0.25,
+      SCALE: [0, 2, 3, 5, 7, 8, 10],
+      NOTE_PROBABILITY: 0.4,
+      OCTAVE_UP_PROBABILITY: 0.7,
+      ACCENT_PROBABILITY: 0.15,
+      SLIDE_PROBABILITY: 0.1,
+      ACCENT_GAIN_MULTIPLIER: 1.5,
+      NORMAL_GAIN: 0.7,
+      ACCENT_GAIN: 1.0,
+      KNOB_ROTATION_MIN: -135,
+      KNOB_ROTATION_RANGE: 270,
+      DRAG_SENSITIVITY_NORMAL: 0.5,
+      DRAG_SENSITIVITY_FINE: 0.1,
+      PITCH_MAX: 48,
+      FILTER_ENV_DECAY_MULTIPLIER: 1.2,
+      VCA_RELEASE: 0.05,
+      OSC_STOP_OFFSET: 0.1,
+      SLIDE_TIME: 0.05
+    };
+
+    // ============================================================
+    // AudioEngine: Handles all audio synthesis
+    // ============================================================
+    class AudioEngine {
+      constructor() {
+        this.audioContext = null;
+      }
+
+      initialize() {
+        if (!this.audioContext) {
+          this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
         }
       }
 
-      // State
-      let sequence = [];
-      function generateRandomSequence() {
-        const scale = [0,2,3,5,7,8,10];
-        let temp = [], lastActive=false;
-        for (let i=0;i<MAX_STEPS;i++){
-          const active = Math.random() < 0.4;
-          const pitch = scale[Math.floor(Math.random()*scale.length)];
-          const octave = Math.random() < 0.7 ? 1 : 0;
-          const accent = active && Math.random() < 0.15;
-          const slide = active && lastActive && Math.random() < 0.1;
-          temp.push({active, pitch, octave, accent, slide});
+      getContext() {
+        return this.audioContext;
+      }
+
+      midiToFrequency(midiNote) {
+        return Math.pow(2, (midiNote - 69) / 12) * 440;
+      }
+
+      createOscillator(waveType, frequency, time) {
+        const osc = this.audioContext.createOscillator();
+        osc.type = waveType === 'SAW' ? 'sawtooth' : 'square';
+        osc.frequency.setValueAtTime(frequency, time);
+        return osc;
+      }
+
+      createFilter(cutoff, resonance, time) {
+        const filter = this.audioContext.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(cutoff, time);
+        filter.Q.setValueAtTime(resonance, time);
+        return filter;
+      }
+
+      createEnvelope(attackValue, decayTime, time) {
+        const env = this.audioContext.createGain();
+        env.gain.setValueAtTime(attackValue, time);
+        env.gain.linearRampToValueAtTime(0, time + decayTime);
+        return env;
+      }
+
+      applySlide(osc, prevFreq, targetFreq, time) {
+        osc.frequency.setValueAtTime(prevFreq, time);
+        osc.frequency.linearRampToValueAtTime(targetFreq, time + CONSTANTS.SLIDE_TIME);
+      }
+
+      playNote(note, settings, time, slideInfo = null) {
+        if (!note.active) return;
+
+        const pitch = CONSTANTS.BASE_NOTE + note.octave * 12 + note.pitch;
+        const frequency = this.midiToFrequency(pitch);
+
+        // Create audio nodes
+        const osc = this.createOscillator(settings.waveform, frequency, time);
+        const filter = this.createFilter(settings.cutoff, settings.resonance, time);
+        const vca = this.audioContext.createGain();
+
+        // Apply envelope modulation to filter
+        const envMod = note.accent
+          ? settings.envMod * CONSTANTS.ACCENT_GAIN_MULTIPLIER
+          : settings.envMod;
+
+        const filterEnv = this.createEnvelope(
+          envMod,
+          settings.decay * CONSTANTS.FILTER_ENV_DECAY_MULTIPLIER,
+          time
+        );
+        filterEnv.connect(filter.frequency);
+
+        // Apply VCA envelope
+        const gain = note.accent ? CONSTANTS.ACCENT_GAIN : CONSTANTS.NORMAL_GAIN;
+        vca.gain.setValueAtTime(gain, time);
+        vca.gain.linearRampToValueAtTime(0, time + settings.decay + CONSTANTS.VCA_RELEASE);
+
+        // Apply slide if needed
+        if (note.slide && slideInfo) {
+          const prevFreq = this.midiToFrequency(slideInfo.prevPitch);
+          this.applySlide(osc, prevFreq, frequency, time);
+        }
+
+        // Connect audio graph
+        osc.connect(filter);
+        filter.connect(vca);
+        vca.connect(this.audioContext.destination);
+
+        // Start and stop oscillator
+        osc.start(time);
+        osc.stop(time + settings.decay + CONSTANTS.OSC_STOP_OFFSET);
+      }
+    }
+
+    // ============================================================
+    // Sequencer: Manages sequence data and operations
+    // ============================================================
+    class Sequencer {
+      constructor() {
+        this.sequence = [];
+        this.length = CONSTANTS.MAX_STEPS;
+        this.currentStep = 0;
+        this.initialize();
+      }
+
+      initialize() {
+        this.generateRandom();
+      }
+
+      generateRandom() {
+        const newSequence = [];
+        let lastActive = false;
+
+        for (let i = 0; i < CONSTANTS.MAX_STEPS; i++) {
+          const active = Math.random() < CONSTANTS.NOTE_PROBABILITY;
+          const pitch = CONSTANTS.SCALE[Math.floor(Math.random() * CONSTANTS.SCALE.length)];
+          const octave = Math.random() < CONSTANTS.OCTAVE_UP_PROBABILITY ? 1 : 0;
+          const accent = active && Math.random() < CONSTANTS.ACCENT_PROBABILITY;
+          const slide = active && lastActive && Math.random() < CONSTANTS.SLIDE_PROBABILITY;
+
+          newSequence.push({ active, pitch, octave, accent, slide });
           lastActive = active;
         }
-        sequence = temp;
+
+        this.sequence = newSequence;
       }
 
-      function updateUI() {
-        sequence.forEach((note, i) => {
-          const stepEl = sequencerContainer.children[i];
-          if (!stepEl) return;
-          const led = stepEl.querySelector('.led');
-          led.classList.toggle('active', note.active);
-          led.classList.toggle('accent', note.active && note.accent);
-          const accentButton = stepEl.querySelector('.note-controls button:nth-child(3)');
-          accentButton.classList.toggle('active', note.accent);
-          const slideButton = stepEl.querySelector('.note-controls button:nth-child(4)');
-          slideButton.classList.toggle('active', note.slide);
+      getNote(index) {
+        return this.sequence[index];
+      }
+
+      toggleActive(index) {
+        this.sequence[index].active = !this.sequence[index].active;
+        if (!this.sequence[index].active) {
+          this.sequence[index].accent = false;
+          this.sequence[index].slide = false;
+        }
+      }
+
+      toggleAccent(index) {
+        if (this.sequence[index].active) {
+          this.sequence[index].accent = !this.sequence[index].accent;
+        }
+      }
+
+      toggleSlide(index) {
+        if (this.sequence[index].active) {
+          this.sequence[index].slide = !this.sequence[index].slide;
+        }
+      }
+
+      changePitch(index, direction) {
+        if (!this.sequence[index].active) return;
+
+        let combinedPitch = this.sequence[index].pitch + this.sequence[index].octave * 12;
+        combinedPitch += direction;
+        combinedPitch = Math.max(0, Math.min(CONSTANTS.PITCH_MAX, combinedPitch));
+
+        this.sequence[index].octave = Math.floor(combinedPitch / 12);
+        this.sequence[index].pitch = combinedPitch % 12;
+      }
+
+      setLength(length) {
+        this.length = Math.max(1, Math.min(CONSTANTS.MAX_STEPS, length));
+      }
+
+      getLength() {
+        return this.length;
+      }
+
+      setCurrentStep(step) {
+        this.currentStep = step % this.length;
+      }
+
+      getCurrentStep() {
+        return this.currentStep;
+      }
+
+      nextStep() {
+        this.currentStep = (this.currentStep + 1) % this.length;
+        return this.currentStep;
+      }
+
+      reset() {
+        this.currentStep = 0;
+      }
+
+      getSlideInfo(currentIndex) {
+        if (currentIndex === 0) return null;
+
+        const prevIndex = (currentIndex - 1 + this.length) % this.length;
+        const prevNote = this.sequence[prevIndex];
+
+        if (!prevNote.active) return null;
+
+        return {
+          prevPitch: CONSTANTS.BASE_NOTE + prevNote.octave * 12 + prevNote.pitch
+        };
+      }
+    }
+
+    // ============================================================
+    // KnobController: Handles rotary knob interactions
+    // ============================================================
+    class KnobController {
+      constructor(knobElement) {
+        this.knob = knobElement;
+        this.initialize();
+      }
+
+      initialize() {
+        this.updateRotation();
+        this.knob.addEventListener('input', () => this.updateRotation());
+        this.knob.addEventListener('mousedown', (e) => this.onMouseDown(e));
+        this.knob.addEventListener('touchstart', (e) => this.onTouchStart(e), { passive: false });
+      }
+
+      updateRotation() {
+        const min = parseFloat(this.knob.min);
+        const max = parseFloat(this.knob.max);
+        const val = parseFloat(this.knob.value);
+        const percentage = (val - min) / (max - min);
+        const degrees = CONSTANTS.KNOB_ROTATION_MIN + percentage * CONSTANTS.KNOB_ROTATION_RANGE;
+        this.knob.style.transform = `rotate(${degrees}deg)`;
+      }
+
+      onMouseDown(e) {
+        this.startDrag(e.clientY, e.shiftKey, false);
+      }
+
+      onTouchStart(e) {
+        const touch = e.touches[0];
+        this.startDrag(touch.clientY, false, true);
+      }
+
+      startDrag(startY, fineMode, isTouch) {
+        const initialValue = parseFloat(this.knob.value);
+        const min = parseFloat(this.knob.min);
+        const max = parseFloat(this.knob.max);
+        const range = max - min;
+
+        const updateValue = (clientY, shiftKey) => {
+          const deltaY = startY - clientY;
+          const sensitivity = (shiftKey || fineMode)
+            ? CONSTANTS.DRAG_SENSITIVITY_FINE
+            : CONSTANTS.DRAG_SENSITIVITY_NORMAL;
+
+          let newValue = initialValue + (deltaY / 100) * range * sensitivity;
+          newValue = Math.max(min, Math.min(max, newValue));
+
+          this.knob.value = newValue;
+          this.knob.dispatchEvent(new Event('input'));
+        };
+
+        if (isTouch) {
+          const onTouchMove = (e) => {
+            if (!e.touches[0]) return;
+            updateValue(e.touches[0].clientY, false);
+          };
+          const onTouchEnd = () => {
+            document.removeEventListener('touchmove', onTouchMove);
+            document.removeEventListener('touchend', onTouchEnd);
+          };
+          document.addEventListener('touchmove', onTouchMove, { passive: false });
+          document.addEventListener('touchend', onTouchEnd);
+        } else {
+          const onMouseMove = (e) => {
+            e.preventDefault();
+            updateValue(e.clientY, e.shiftKey);
+          };
+          const onMouseUp = () => {
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+          };
+          document.addEventListener('mousemove', onMouseMove);
+          document.addEventListener('mouseup', onMouseUp);
+        }
+      }
+    }
+
+    // ============================================================
+    // UIController: Manages all UI elements and interactions
+    // ============================================================
+    class UIController {
+      constructor(sequencer) {
+        this.sequencer = sequencer;
+        this.elements = this.getElements();
+        this.knobControllers = [];
+        this.initialize();
+      }
+
+      getElements() {
+        return {
+          sequencerContainer: document.getElementById('sequencer'),
+          playStopButton: document.getElementById('play-stop'),
+          randomizeButton: document.getElementById('randomize'),
+          waveformButton: document.getElementById('waveform'),
+          bpmSlider: document.getElementById('bpm'),
+          bpmDisplay: document.getElementById('bpm-display'),
+          lengthSlider: document.getElementById('length'),
+          lengthDisplay: document.getElementById('length-display'),
+          cutoff: document.getElementById('cutoff'),
+          resonance: document.getElementById('resonance'),
+          envMod: document.getElementById('envMod'),
+          decay: document.getElementById('decay')
+        };
+      }
+
+      initialize() {
+        this.buildSequencerGrid();
+        this.initializeKnobs();
+        this.updateSequencerUI();
+        this.updateSequencerVisibility();
+      }
+
+      buildSequencerGrid() {
+        for (let i = 0; i < CONSTANTS.MAX_STEPS; i++) {
+          const stepEl = this.createStepElement(i);
+          this.elements.sequencerContainer.appendChild(stepEl);
+        }
+      }
+
+      createStepElement(index) {
+        const stepEl = document.createElement('div');
+        stepEl.classList.add('step');
+        stepEl.dataset.index = index;
+
+        const led = document.createElement('div');
+        led.classList.add('led');
+        led.addEventListener('click', () => this.onLedClick(index));
+
+        const noteControls = this.createNoteControls(index);
+
+        stepEl.append(led, noteControls);
+        return stepEl;
+      }
+
+      createNoteControls(index) {
+        const container = document.createElement('div');
+        container.classList.add('note-controls');
+
+        const upBtn = this.createButton('▲', () => this.onPitchChange(index, 1));
+        const downBtn = this.createButton('▼', () => this.onPitchChange(index, -1));
+        const accentBtn = this.createButton('A', () => this.onAccentToggle(index));
+        const slideBtn = this.createButton('S', () => this.onSlideToggle(index));
+
+        container.append(upBtn, downBtn, accentBtn, slideBtn);
+        return container;
+      }
+
+      createButton(text, onClick) {
+        const btn = document.createElement('button');
+        btn.textContent = text;
+        btn.addEventListener('click', onClick);
+        return btn;
+      }
+
+      initializeKnobs() {
+        const knobElements = document.querySelectorAll('input.knob');
+        knobElements.forEach(knob => {
+          this.knobControllers.push(new KnobController(knob));
         });
       }
 
-      function updatePlayingLED(i) {
-        document.querySelectorAll('.led.playing').forEach(el => el.classList.remove('playing'));
-        const led = sequencerContainer.children[i]?.querySelector('.led');
-        if (led) led.classList.add('playing');
+      onLedClick(index) {
+        this.sequencer.toggleActive(index);
+        this.updateSequencerUI();
       }
 
-      function toggleNote(i){ sequence[i].active = !sequence[i].active; if(!sequence[i].active){ sequence[i].accent=false; sequence[i].slide=false;} updateUI(); }
-      function toggleAccent(i){ if(sequence[i].active){ sequence[i].accent = !sequence[i].accent; updateUI(); } }
-      function toggleSlide(i){ if(sequence[i].active){ sequence[i].slide = !sequence[i].slide; updateUI(); } }
-      function changePitch(i, dir){
-        if(!sequence[i].active) return;
-        let cp = sequence[i].pitch + sequence[i].octave*12;
-        cp += dir; cp = Math.max(0, Math.min(48, cp));
-        sequence[i].octave = Math.floor(cp/12);
-        sequence[i].pitch = cp % 12;
+      onPitchChange(index, direction) {
+        this.sequencer.changePitch(index, direction);
       }
 
-      // Audio
-      function initAudio(){ if(!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
-      function midiToFreq(m){ return Math.pow(2, (m - 69)/12)*440; }
-      function playNote(note, time){
-        if(!note.active) return;
-        const osc = audioCtx.createOscillator();
-        const filter = audioCtx.createBiquadFilter();
-        const vca = audioCtx.createGain();
-        const env = audioCtx.createGain();
-
-        osc.type = knobs.waveform.textContent.toLowerCase()==='saw' ? 'sawtooth':'square';
-        const pitch = baseNote + note.octave*12 + note.pitch;
-        osc.frequency.setValueAtTime(midiToFreq(pitch), time);
-
-        filter.type = 'lowpass';
-        const cutoff = parseFloat(knobs.cutoff.value);
-        filter.frequency.setValueAtTime(cutoff, time);
-        filter.Q.setValueAtTime(parseFloat(knobs.resonance.value), time);
-
-        const decay = parseFloat(knobs.decay.value);
-        const envMod = parseFloat(knobs.envMod.value);
-        env.gain.setValueAtTime(1, time); env.gain.linearRampToValueAtTime(0, time+decay);
-
-        const filterEnv = audioCtx.createGain();
-        filterEnv.gain.setValueAtTime(note.accent ? envMod*1.5 : envMod, time);
-        filterEnv.gain.linearRampToValueAtTime(0, time + decay*1.2);
-        filterEnv.connect(filter.frequency);
-
-        vca.gain.setValueAtTime(note.accent ? 1.0 : 0.7, time);
-        vca.gain.linearRampToValueAtTime(0, time + decay + 0.05);
-
-        // Slide
-        if(note.slide && currentStep>0){
-          const prevIdx = (currentStep - 1 + sequenceLength) % sequenceLength;
-          const prev = sequence[prevIdx];
-          if(prev.active){
-            const prevPitch = baseNote + prev.octave*12 + prev.pitch;
-            osc.frequency.setValueAtTime(midiToFreq(prevPitch), time);
-            osc.frequency.linearRampToValueAtTime(midiToFreq(pitch), time + 0.05);
-          }
-        }
-
-        osc.connect(filter); filter.connect(vca); vca.connect(audioCtx.destination);
-        env.connect(vca.gain);
-        osc.start(time); osc.stop(time + decay + 0.1);
+      onAccentToggle(index) {
+        this.sequencer.toggleAccent(index);
+        this.updateSequencerUI();
       }
 
-      const scheduleAhead = 0.1;
-      function scheduler(){
-        while(nextNoteTime < audioCtx.currentTime + scheduleAhead){
-          if(currentStep >= sequenceLength) currentStep = 0;
-          const note = sequence[currentStep];
-          playNote(note, nextNoteTime);
-          const spb = 60.0 / parseFloat(bpmSlider.value);
-          nextNoteTime += 0.25 * spb;
-          updatePlayingLED(currentStep);
-          currentStep = (currentStep + 1) % sequenceLength;
-        }
-        timerID = setTimeout(scheduler, 25);
+      onSlideToggle(index) {
+        this.sequencer.toggleSlide(index);
+        this.updateSequencerUI();
       }
 
-      function togglePlayback(){
-        initAudio();
-        isPlaying = !isPlaying;
-        if(isPlaying){
-          currentStep = 0;
-          nextNoteTime = audioCtx.currentTime;
-          scheduler();
-          playStopButton.textContent = 'Stop';
-          playStopButton.classList.add('playing');
-        }else{
-          clearTimeout(timerID);
-          playStopButton.textContent = 'Play';
-          playStopButton.classList.remove('playing');
-          document.querySelectorAll('.led.playing').forEach(el=>el.classList.remove('playing'));
+      updateSequencerUI() {
+        this.sequencer.sequence.forEach((note, i) => {
+          const stepEl = this.elements.sequencerContainer.children[i];
+          if (!stepEl) return;
+
+          const led = stepEl.querySelector('.led');
+          led.classList.toggle('active', note.active);
+          led.classList.toggle('accent', note.active && note.accent);
+
+          const accentBtn = stepEl.querySelector('.note-controls button:nth-child(3)');
+          accentBtn.classList.toggle('active', note.accent);
+
+          const slideBtn = stepEl.querySelector('.note-controls button:nth-child(4)');
+          slideBtn.classList.toggle('active', note.slide);
+        });
+      }
+
+      updatePlayingLED(index) {
+        document.querySelectorAll('.led.playing').forEach(el =>
+          el.classList.remove('playing')
+        );
+
+        const stepEl = this.elements.sequencerContainer.children[index];
+        if (stepEl) {
+          const led = stepEl.querySelector('.led');
+          if (led) led.classList.add('playing');
         }
       }
 
-      function updateSeqVisibility(){
-        const steps = sequencerContainer.children;
-        for(let i=0;i<MAX_STEPS;i++){
-          steps[i].style.display = i < sequenceLength ? 'flex' : 'none';
+      updateSequencerVisibility() {
+        const steps = this.elements.sequencerContainer.children;
+        const length = this.sequencer.getLength();
+
+        for (let i = 0; i < CONSTANTS.MAX_STEPS; i++) {
+          steps[i].style.display = i < length ? 'flex' : 'none';
         }
       }
 
-      // Wave switch
-      knobs.waveform.addEventListener('click', ()=>{
-        knobs.waveform.textContent = knobs.waveform.textContent==='SAW' ? 'SQUARE' : 'SAW';
-      });
+      setPlayingState(isPlaying) {
+        if (isPlaying) {
+          this.elements.playStopButton.textContent = 'Stop';
+          this.elements.playStopButton.classList.add('playing');
+        } else {
+          this.elements.playStopButton.textContent = 'Play';
+          this.elements.playStopButton.classList.remove('playing');
+          document.querySelectorAll('.led.playing').forEach(el =>
+            el.classList.remove('playing')
+          );
+        }
+      }
 
-      // BPM/LEN
-      bpmSlider.addEventListener('input', e => bpmDisplay.textContent = e.target.value);
-      lengthSlider.addEventListener('input', e => {
-        sequenceLength = parseInt(e.target.value,10);
-        lengthDisplay.textContent = sequenceLength;
-        updateSeqVisibility();
-        if(isPlaying && currentStep >= sequenceLength) currentStep = 0;
-      });
-
-      // Play/Randomize
-      playStopButton.addEventListener('click', togglePlayback);
-      randomizeButton.addEventListener('click', () => { generateRandomSequence(); updateUI(); });
-
-      // ===== Knob drag logic remains (works at small size) =====
-      const rotaryKnobs = document.querySelectorAll('input.knob');
-      rotaryKnobs.forEach(knob=>{
-        const updateRotation = ()=>{
-          const min = parseFloat(knob.min), max = parseFloat(knob.max), val = parseFloat(knob.value);
-          const pct = (val - min)/(max - min);
-          const deg = -135 + pct*270;
-          knob.style.transform = `rotate(${deg}deg)`;
+      getSettings() {
+        return {
+          waveform: this.elements.waveformButton.textContent,
+          cutoff: parseFloat(this.elements.cutoff.value),
+          resonance: parseFloat(this.elements.resonance.value),
+          envMod: parseFloat(this.elements.envMod.value),
+          decay: parseFloat(this.elements.decay.value),
+          bpm: parseFloat(this.elements.bpmSlider.value)
         };
-        updateRotation();
-        knob.addEventListener('input', updateRotation);
+      }
 
-        // Mouse
-        knob.addEventListener('mousedown', e => startDrag(e.clientY, e.shiftKey));
-        // Touch
-        knob.addEventListener('touchstart', e => {
-          const t = e.touches[0];
-          startDrag(t.clientY, e.shiftKey || false, true);
-        }, {passive:false});
+      getBPM() {
+        return parseFloat(this.elements.bpmSlider.value);
+      }
+    }
 
-        function startDrag(startY, fine=false, isTouch=false){
-          const initial = parseFloat(knob.value);
-          const min = parseFloat(knob.min), max = parseFloat(knob.max), range = max - min;
-          function move(clientY, shiftKey){
-            const deltaY = startY - clientY;
-            const sens = (shiftKey || fine) ? 0.1 : 0.5;
-            let val = initial + (deltaY/100)*range*sens;
-            val = Math.max(min, Math.min(max, val));
-            knob.value = val;
-            knob.dispatchEvent(new Event('input'));
+    // ============================================================
+    // TB303Synth: Main controller coordinating all components
+    // ============================================================
+    class TB303Synth {
+      constructor() {
+        this.audioEngine = new AudioEngine();
+        this.sequencer = new Sequencer();
+        this.uiController = new UIController(this.sequencer);
+        this.isPlaying = false;
+        this.nextNoteTime = 0;
+        this.timerID = null;
+        this.bindEvents();
+      }
+
+      bindEvents() {
+        const ui = this.uiController.elements;
+
+        ui.playStopButton.addEventListener('click', () => this.togglePlayback());
+        ui.randomizeButton.addEventListener('click', () => this.randomize());
+
+        ui.waveformButton.addEventListener('click', () => {
+          ui.waveformButton.textContent =
+            ui.waveformButton.textContent === 'SAW' ? 'SQUARE' : 'SAW';
+        });
+
+        ui.bpmSlider.addEventListener('input', (e) => {
+          ui.bpmDisplay.textContent = e.target.value;
+        });
+
+        ui.lengthSlider.addEventListener('input', (e) => {
+          const length = parseInt(e.target.value, 10);
+          this.sequencer.setLength(length);
+          ui.lengthDisplay.textContent = length;
+          this.uiController.updateSequencerVisibility();
+
+          if (this.isPlaying && this.sequencer.getCurrentStep() >= length) {
+            this.sequencer.reset();
           }
-          function onMouseMove(e){ e.preventDefault(); move(e.clientY, e.shiftKey); }
-          function onMouseUp(){ document.removeEventListener('mousemove', onMouseMove); document.removeEventListener('mouseup', onMouseUp); }
-          function onTouchMove(e){ if(!e.touches[0]) return; move(e.touches[0].clientY, false); }
-          function onTouchEnd(){ document.removeEventListener('touchmove', onTouchMove); document.removeEventListener('touchend', onTouchEnd); }
+        });
+      }
 
-          if(isTouch){
-            document.addEventListener('touchmove', onTouchMove, {passive:false});
-            document.addEventListener('touchend', onTouchEnd);
-          }else{
-            document.addEventListener('mousemove', onMouseMove);
-            document.addEventListener('mouseup', onMouseUp);
-          }
+      togglePlayback() {
+        this.audioEngine.initialize();
+        this.isPlaying = !this.isPlaying;
+
+        if (this.isPlaying) {
+          this.startPlayback();
+        } else {
+          this.stopPlayback();
         }
-      });
 
-      // Init
-      initGrid();
-      generateRandomSequence();
-      updateUI();
-      updateSeqVisibility();
+        this.uiController.setPlayingState(this.isPlaying);
+      }
+
+      startPlayback() {
+        this.sequencer.reset();
+        this.nextNoteTime = this.audioEngine.getContext().currentTime;
+        this.scheduler();
+      }
+
+      stopPlayback() {
+        if (this.timerID) {
+          clearTimeout(this.timerID);
+          this.timerID = null;
+        }
+      }
+
+      scheduler() {
+        const ctx = this.audioEngine.getContext();
+
+        while (this.nextNoteTime < ctx.currentTime + CONSTANTS.SCHEDULE_AHEAD_TIME) {
+          this.scheduleNote(this.nextNoteTime);
+          this.advanceStep();
+        }
+
+        this.timerID = setTimeout(() => this.scheduler(), CONSTANTS.SCHEDULER_INTERVAL);
+      }
+
+      scheduleNote(time) {
+        const currentStep = this.sequencer.getCurrentStep();
+        const note = this.sequencer.getNote(currentStep);
+        const settings = this.uiController.getSettings();
+
+        let slideInfo = null;
+        if (note.slide) {
+          slideInfo = this.sequencer.getSlideInfo(currentStep);
+        }
+
+        this.audioEngine.playNote(note, settings, time, slideInfo);
+        this.uiController.updatePlayingLED(currentStep);
+      }
+
+      advanceStep() {
+        const secondsPerBeat = 60.0 / this.uiController.getBPM();
+        this.nextNoteTime += CONSTANTS.SIXTEENTH_NOTE_MULTIPLIER * secondsPerBeat;
+        this.sequencer.nextStep();
+      }
+
+      randomize() {
+        this.sequencer.generateRandom();
+        this.uiController.updateSequencerUI();
+      }
+    }
+
+    // ============================================================
+    // Initialize application
+    // ============================================================
+    document.addEventListener('DOMContentLoaded', () => {
+      new TB303Synth();
     });
   </script>
 </body>
