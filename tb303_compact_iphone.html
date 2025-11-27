@@ -26,18 +26,24 @@
     .ctrl{display:flex;flex-direction:column;align-items:center;gap:2px;}
     .ctrl label{font-size:9px;font-weight:700;letter-spacing:.2px;text-transform:uppercase}
     .value-display{font-size:7px;font-weight:700;color:#0f0;font-family:ui-monospace,monospace;background:#2b2b2b;padding:1px 3px;border-radius:3px;min-width:32px;text-align:center;border:1px solid #333}
-    /* Knob-like ranges set to 1/3 original (≈56px → 18.7px) -> use 20px */
+    /* Knob: optimized for touch screens */
     input[type="range"].knob{
-      -webkit-appearance:none;appearance:none;width:20px;height:20px;border-radius:50%;
+      -webkit-appearance:none;appearance:none;width:36px;height:36px;border-radius:50%;
       background:#2b2b2b;border:2px solid #3f3f3f;position:relative;
       box-shadow:inset 0 0 0 1px #0003, 1px 1px 2px #fff9, -1px -1px 2px #0006;
       touch-action:none;
       transform-origin:center center;
+      cursor:pointer;
     }
     input[type="range"].knob::-webkit-slider-thumb{ -webkit-appearance:none; width:0; height:0;}
     input[type="range"].knob::before{
-      content:""; position:absolute; left:50%; top:3px; transform:translateX(-50%);
-      width:2px; height:6px; border-radius:2px; background:#eee;
+      content:""; position:absolute; left:50%; top:5px;
+      transform:translateX(-50%);
+      width:3px; height:12px; border-radius:2px;
+      background:#fff;
+      box-shadow:0 0 2px rgba(0,0,0,0.8);
+      pointer-events:none;
+      z-index:10;
     }
     /* Waveform switch button */
     .switch{padding:4px 8px;border:1px solid var(--line);border-radius:8px;background:#bbb;font-weight:700;font-size:11px}
